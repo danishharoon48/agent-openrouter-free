@@ -1,4 +1,5 @@
 name: Dynamic multilingual browser agent
+run-name: Browser task ${{ inputs.request_id }}
 on:
   workflow_dispatch:
     inputs:
@@ -8,6 +9,10 @@ on:
         type: string
       target_url:
         description: Initial HTTP or HTTPS URL
+        required: true
+        type: string
+      request_id:
+        description: Unique dashboard request identifier
         required: true
         type: string
       fallback_provider:
