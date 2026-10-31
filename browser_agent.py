@@ -1,62 +1,86 @@
+#!/usr/bin/env python3
+"""Browser agent for benchmark scenarios using Playwright."""
+
 import argparse
 import json
-from playwright.sync_api import sync_playwright, expect
+import sys
+
+from playwright.sync_api import sync_playwright
+
+
+def run_search(page, base_url):
+    page.goto(base_url)
+    page.fill("#search", "browser automation")
+    page.click("button[type=submit]")
+    page.wait_for_selector("#search-result", state="visible")
+    text = page.inner_text("#search-result").strip()
+    expected = "Found: browser automation"
+    success = text == expected
+    return success, text, page.url
+
+
+def run_dynamic_dom(page, base_url):
+    page.goto(base_url.rstrip("/") + "/dynamic")
+    page.click("#load-record")
+    # Wait until the result div contains the exact expected text
+    page.wait_for_function(
+        "() => { const el = document.querySelector('#dynamic-result'); "
+        "return el && el.textContent.trim() === 'Loaded record: DYNAMIC-42'; }"
+    )
+    text = page.inner_text("#dynamic-result").strip()
+    expected = "Loaded record: DYNAMIC-42"
+    success = text == expected
+    return success, text, page.url
+
+
+def run_pagination(page, base_url):
+    page.goto(base_url.rstrip("/") + "/page/1")
+    page.click("a#next")
+    # Wait until the h1 indicates we are on page 2
+    page.wait_for_function(
+        "() => { const el = document.querySelector('h1'); "
+        "return el && el.textContent.trim() === 'Page 2 of 2'; }"
+    )
+    text = page.inner_text("#page-record").strip()
+    expected = "Record 2 of 2: pagination verified"
+    success = text == expected
+    return success, text, page.url
+
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", required=True)
+    parser = argparse.ArgumentParser(description="Run a benchmark scenario.")
+    parser.add_argument("--base-url", required=True, help="Base URL of the benchmark site")
     parser.add_argument("--scenario", required=True, choices=["search", "dynamic_dom", "pagination"])
     args = parser.parse_args()
-    
-    base_url = args.base_url.rstrip("/")
-    scenario = args.scenario
-    
-    extracted_text = None
-    success = False
-    
+
+    scenario = args_scenario = args.scenario
+    base_url = args.base_url
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
-        
+        page = browser.new_page()
         try:
             if scenario == "search":
-                page.goto(base_url)
-                page.fill("input#search", "browser automation")
-                page.click("button[type=submit]")
-                expect(page.locator("#search-result")).to_have_text("Found: browser automation")
-                extracted_text = page.locator("#search-result").inner_text().strip()
-                success = extracted_text == "Found: browser automation"
-            
+                success, extracted_text, final_url = run_search(page, base_url)
             elif scenario == "dynamic_dom":
-                page.goto(base_url + "/dynamic")
-                page.click("button#load-record")
-                expect(page.locator("#dynamic-result")).to_have_text("Loaded record: DYNAMIC-42")
-                extracted_text = page.locator("#dynamic-result").inner_text().strip()
-                success = extracted_text == "Loaded record: DYNAMIC-42"
-            
+                success, extracted_text, final_url = run_dynamic_dom(page, base_url)
             elif scenario == "pagination":
-                page.goto(base_url + "/page/1")
-                page.click("a#next")
-                expect(page.locator("h1")).to_have_text("Page 2 of 2")
-                extracted_text = page.locator("#page-record").inner_text().strip()
-                success = extracted_text == "Record 2 of 2: pagination verified"
-        
+                success, extracted_text, final_url = run_pagination(page, base_url)
+            else:
+                success, extracted_text, final_url = False, None, page.url
         except Exception:
-            success = False
-            extracted_text = None
-        
+            success, extracted_text, final_url = False, None, page.url
         finally:
-            context.close()
             browser.close()
-    
+
     result = {
         "scenario": scenario,
         "success": success,
         "extracted_text": extracted_text,
-        "final_url": page.url
+        "final_url": final_url,
     }
     print(json.dumps(result))
+
 
 if __name__ == "__main__":
     main()
