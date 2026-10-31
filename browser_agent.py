@@ -1,145 +1,90 @@
-#!/usr/bin/env python3
-"""
-Browser Agent - Playwright automation script for three scenarios.
-Accepts --base-url and --scenario command-line arguments.
-"""
-
+import argparse
 import json
 import sys
-import argparse
-from urllib.parse import urljoin
-
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-
-
-def run_search_scenario(base_url: str) -> dict:
-    """Run the search scenario: fill search, submit, extract result."""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(base_url)
-
-        # Fill search input
-        page.fill("input#search", "browser automation")
-        # Submit the form
-        page.click("button[type=submit]")
-
-        # Wait for search results to appear
-        search_result = page.locator("#search-result")
-        search_result.wait_for(state="visible")
-        extracted_text = search_result.inner_text().strip()
-
-        # Verify the extracted text matches expected
-        if extracted_text != "Found: browser automation":
-            print(f"ERROR: Expected 'Found: browser automation' but got '{extracted_text}'", file=sys.stderr)
-            browser.close()
-            return {
-                "scenario": "search",
-                "success": False,
-                "extracted_text": extracted_text,
-                "final_url": page.url
-            }
-
-        browser.close()
-        return {
-            "scenario": "search",
-            "success": True,
-            "extracted_text": extracted_text,
-            "final_url": page.url
-        }
-
-
-def run_dynamic_dom_scenario(base_url: str) -> dict:
-    """Run the dynamic DOM scenario: load record and extract result."""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(urljoin(base_url, "/dynamic"))
-
-        # Click the load-record button
-        page.click("button#load-record")
-
-        # Wait for the dynamically inserted content with exact text
-        dynamic_result = page.locator("#dynamic-result")
-        dynamic_result.wait_for(state="visible")
-        # Wait until the text matches exactly
-        dynamic_result.locator("text='Loaded record: DYNAMIC-42'").wait_for(state="visible")
-        extracted_text = dynamic_result.inner_text().strip()
-
-        if extracted_text != "Loaded record: DYNAMIC-42":
-            print(f"ERROR: Expected 'Loaded record: DYNAMIC-42' but got '{extracted_text}'", file=sys.stderr)
-            browser.close()
-            return {
-                "scenario": "dynamic_dom",
-                "success": False,
-                "extracted_text": extracted_text,
-                "final_url": page.url
-            }
-
-        browser.close()
-        return {
-            "scenario": "dynamic_dom",
-            "success": True,
-            "extracted_text": extracted_text,
-            "final_url": page.url
-        }
-
-
-def run_pagination_scenario(base_url: str) -> dict:
-    """Run the pagination scenario: navigate pages and extract record text."""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(urljoin(base_url, "/page/1"))
-
-        # Click next button to go to page 2
-        page.click("a#next")
-
-        # Wait for h1 to equal 'Page 2 of 2'
-        h1 = page.locator("h1")
-        h1.wait_for(state="visible")
-        h1.locator("text='Page 2 of 2'").wait_for(state="visible")
-
-        # Now extract from #page-record on page 2
-        page_record = page.locator("#page-record")
-        page_record.wait_for(state="visible")
-        extracted_text = page_record.inner_text().strip()
-
-        if extracted_text != "Record 2 of 2: pagination verified":
-            print(f"ERROR: Expected 'Record 2 of 2: pagination verified' but got '{extracted_text}'", file=sys.stderr)
-            browser.close()
-            return {
-                "scenario": "pagination",
-                "success": False,
-                "extracted_text": extracted_text,
-                "final_url": page.url
-            }
-
-        browser.close()
-        return {
-            "scenario": "pagination",
-            "success": True,
-            "extracted_text": extracted_text,
-            "final_url": page.url
-        }
-
+from playwright.sync_api import sync_playwright
 
 def main():
-    parser = argparse.ArgumentParser(description="Browser Agent - Playwright automation")
-    parser.add_argument("--base-url", default="http://127.0.0.1:45265", help="Base URL for the test")
-    parser.add_argument("--scenario", required=True, choices=["search", "dynamic_dom", "pagination"],
-                        help="Scenario to run")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--base-url', required=True, help='Base URL')
+    parser.add_argument('--scenario', required=True, choices=['search', 'dynamic_dom', 'pagination'],
+                        help='Scenario to execute')
     args = parser.parse_args()
 
-    if args.scenario == "search":
-        result = run_search_scenario(args.base_url)
-    elif args.scenario == "dynamic_dom":
-        result = run_dynamic_dom_scenario(args.base_url)
-    elif args.scenario == "pagination":
-        result = run_pagination_scenario(args.base_url)
+    scenario = args.scenario
+    base_url = args.base_url.rstrip('/')
 
-    print(json.dumps(result, indent=2))
+    paths = {
+        'search': '',
+        'dynamic_dom': '/dynamic',
+        'pagination': '/page/1'
+    }
+    path = paths[scenario]
 
+    if path:
+        full_url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    else:
+        full_url = base_url
 
-if __name__ == "__main__":
+    expected_results = {
+        'search': "Found: browser automation",
+        'dynamic_dom': "Loaded record: DYNAMIC-42",
+        'pagination': "Record 2 of 2: pagination verified"
+    }
+    expected_text = expected_results[scenario]
+
+    extracted_text = None
+    success = False
+    final_url = full_url
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.goto(full_url)
+
+            if scenario == 'search':
+                page.locator('input#search').fill('browser automation')
+                page.locator('button[type=submit]').click()
+                page.wait_for_selector('#search-result', state='visible', timeout=10000)
+                extracted_text = page.locator('#search-result').inner_text().strip()
+                success = extracted_text == expected_text
+
+            elif scenario == 'dynamic_dom':
+                page.locator('button#load-record').click()
+                # Wait until #dynamic-result contains the exact expected text
+                page.wait_for_function(
+                    "() => document.querySelector('#dynamic-result')?.textContent?.trim() === 'Loaded record: DYNAMIC-42'",
+                    timeout=10000
+                )
+                extracted_text = page.locator('#dynamic-result').inner_text().strip()
+                success = extracted_text == expected_text
+
+            else:  # pagination
+                page.locator('a#next').click()
+                # Wait for h1 to equal exactly 'Page 2 of 2'
+                page.wait_for_function(
+                    "() => document.querySelector('h1')?.textContent?.trim() === 'Page 2 of 2'",
+                    timeout=10000
+                )
+                extracted_text = page.locator('#page-record').inner_text().strip()
+                success = extracted_text == expected_text
+
+            final_url = page.url
+
+        except Exception as e:
+            # On any error, success remains False, extracted_text stays None
+            pass
+        finally:
+            browser.close()
+
+    result = {
+        "scenario": scenario,
+        "success": success,
+        "extracted_text": extracted_text if success else None,
+        "final_url": final_url
+    }
+
+    print(json.dumps(result))
+
+if __name__ == '__main__':
     main()
