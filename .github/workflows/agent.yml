@@ -13,7 +13,8 @@ on:
         type: string
       request_id:
         description: Unique dashboard request identifier
-        required: true
+        required: false
+        default: manual
         type: string
       fallback_provider:
         description: Optional fallback provider (gemini, groq, openrouter, none)
