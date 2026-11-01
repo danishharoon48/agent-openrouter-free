@@ -36,7 +36,9 @@ jobs:
       PRIMARY_PROVIDER: openrouter
       TASK_PROMPT: ${{ inputs.task_prompt }}
       TARGET_URL: ${{ inputs.target_url }}
-      FALLBACK_PROVIDER: ${{ inputs.fallback_provider }}\n      CALLBACK_URL: ${{ inputs.callback_url }}\n      REQUEST_ID: ${{ inputs.request_id }}\n      TASK_STATUS: ${{ job.status }}
+      FALLBACK_PROVIDER: ${{ inputs.fallback_provider }}
+      CALLBACK_URL: ${{ inputs.callback_url }}
+      REQUEST_ID: ${{ inputs.request_id }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
