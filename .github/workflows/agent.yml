@@ -31,7 +31,7 @@ jobs:
       PRIMARY_PROVIDER: openrouter
       TASK_PROMPT: ${{ inputs.task_prompt }}
       TARGET_URL: ${{ inputs.target_url }}
-      FALLBACK_PROVIDER: ${{ inputs.fallback_provider }}
+      FALLBACK_PROVIDER: ${{ inputs.fallback_provider }}\n      CALLBACK_URL: ${{ inputs.callback_url }}\n      REQUEST_ID: ${{ inputs.request_id }}\n      TASK_STATUS: ${{ job.status }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -60,3 +60,42 @@ jobs:
             artifacts/
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Notify external callback
+        if: always() && inputs.callback_url != ''
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          TASK_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTIFACT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, urllib.request
+          output = None
+          path = pathlib.Path("output.json")
+          if path.exists():
+              try:
+                  output = json.loads(path.read_text(encoding="utf-8"))
+              except Exception:
+                  output = path.read_text(encoding="utf-8")[:50000]
+          payload = {
+              "task_id": os.environ.get("REQUEST_ID", ""),
+              "status": os.environ.get("TASK_STATUS", "completed"),
+              "output": output,
+              "run_url": os.environ["RUN_URL"],
+              "screenshot_url": os.environ["ARTIFACT_URL"] + "#artifacts",
+              "artifact_url": os.environ["ARTIFACT_URL"] + "#artifacts"
+          }
+          request = urllib.request.Request(
+              os.environ["CALLBACK_URL"],
+              data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json", "X-Blarumo-Task-ID": payload["task_id"]},
+              method="POST"
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  print("Callback delivered:", response.status)
+          except Exception as error:
+              print("Callback delivery failed:", str(error))
+          PY
