@@ -21,6 +21,11 @@ on:
         required: false
         default: none
         type: string
+      callback_url:
+        description: Optional HTTPS completion webhook
+        required: false
+        default: ''
+        type: string
 jobs:
   execute:
     runs-on: ubuntu-latest
