@@ -125,6 +125,79 @@ def _copy_sandbox_artifacts(workspace):
             shutil.copyfile(item, destination)
 
 
+def execute_script(code, timeout):
+    """Compile on the host, then run generated code in an egress-filtered container."""
+    script = ROOT / "generated_task.py"
+    script.write_text(code, encoding="utf-8")
+    environment = sandbox_environment()
+    check = subprocess.run(
+        [sys.executable, "-m", "py_compile", str(script)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=ROOT,
+        env=environment,
+    )
+    if check.returncode:
+        return False, check.stderr or check.stdout
+
+    OUTPUT.unlink(missing_ok=True)
+    ARTIFACTS.mkdir(exist_ok=True)
+    workspace = Path(tempfile.mkdtemp(prefix=".agent-sandbox-", dir=ROOT))
+    container_name = "uba-" + uuid.uuid4().hex[:16]
+    try:
+        sandbox_script = workspace / "generated_task.py"
+        shutil.copyfile(script, sandbox_script)
+        sandbox_script.chmod(0o444)
+        (workspace / "artifacts").mkdir()
+        command = build_sandbox_command(str(workspace.resolve()), container_name)
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=ROOT,
+            env=environment,
+        )
+        logs = (process.stdout or "") + "\n" + (process.stderr or "")
+        _copy_sandbox_artifacts(workspace)
+
+        if process.returncode:
+            return False, f"Sandbox exited with status {process.returncode}.\n" + logs[-12000:]
+
+        output_path = workspace / "output.json"
+        if output_path.is_symlink() or not output_path.is_file():
+            return False, "Sandbox completed without creating a regular output.json file.\n" + logs[-4000:]
+        try:
+            data = json.loads(output_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return False, "Sandbox produced invalid output.json: " + str(exc) + "\n" + logs[-4000:]
+        if not isinstance(data, dict):
+            return False, "Sandbox output.json must contain a JSON object.\n" + logs[-4000:]
+        OUTPUT.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True, logs[-8000:]
+    except subprocess.TimeoutExpired as exc:
+        for action in ("kill", "rm"):
+            command = ["docker", action]
+            if action == "rm":
+                command.append("-f")
+            command.append(container_name)
+            try:
+                subprocess.run(
+                    command, capture_output=True, text=True, timeout=10, env=environment,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+        _copy_sandbox_artifacts(workspace)
+        stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        return False, "Sandbox execution timed out.\n" + stdout[-4000:] + stderr[-4000:]
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Sandbox execution failed ({type(exc).__name__}): {exc}"
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Dynamic multilingual browser task executor')
     parser.add_argument('--task-prompt', default=os.getenv('TASK_PROMPT', ''))
