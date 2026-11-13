@@ -1,6 +1,11 @@
 name: Dynamic multilingual browser agent
 run-name: Browser task ${{ inputs.request_id }}
 on:
+  pull_request:
+    paths:
+      - "agent_runner.py"
+      - "tests/**"
+      - ".github/workflows/agent.yml"
   workflow_dispatch:
     inputs:
       task_prompt:
@@ -32,29 +37,43 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-    env:
-      PRIMARY_PROVIDER: openrouter
-      TASK_PROMPT: ${{ inputs.task_prompt }}
-      TARGET_URL: ${{ inputs.target_url }}
-      FALLBACK_PROVIDER: ${{ inputs.fallback_provider }}
-      CALLBACK_URL: ${{ inputs.callback_url }}
-      REQUEST_ID: ${{ inputs.request_id }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install Playwright
-        run: |
-          python -m pip install --upgrade pip
-          pip install playwright
-          python -m playwright install --with-deps chromium
       - name: Validate runner
         run: python -m py_compile agent_runner.py
+      - name: Run runner security tests
+        run: python -m unittest discover -s tests -v
+      - name: Configure restricted browser sandbox network
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          docker network create --driver bridge --subnet=172.31.240.0/24 --ipv6=false uba-agent-sandbox
+          sudo iptables -N UBA_QA_EGRESS 2>/dev/null || true
+          sudo iptables -F UBA_QA_EGRESS
+          sudo iptables -C DOCKER-USER -s 172.31.240.0/24 -j UBA_QA_EGRESS 2>/dev/null || sudo iptables -I DOCKER-USER 1 -s 172.31.240.0/24 -j UBA_QA_EGRESS
+          for cidr in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 192.88.99.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4; do
+            sudo iptables -A UBA_QA_EGRESS -d "$cidr" -j DROP
+          done
+          sudo iptables -A UBA_QA_EGRESS -j RETURN
+      - name: Pull isolated Playwright runtime
+        if: github.event_name == 'workflow_dispatch'
+        run: docker pull mcr.microsoft.com/playwright/python:v1.52.0-noble
       - name: Execute multilingual task
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PRIMARY_PROVIDER: openrouter
+          TASK_PROMPT: ${{ inputs.task_prompt }}
+          TARGET_URL: ${{ inputs.target_url }}
+          FALLBACK_PROVIDER: ${{ inputs.fallback_provider }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          BROWSER_SANDBOX_NETWORK: uba-agent-sandbox
+          BROWSER_SANDBOX_IMAGE: mcr.microsoft.com/playwright/python:v1.52.0-noble
         run: python agent_runner.py --timeout 180
       - name: Upload output, screenshots and logs
         if: always()
@@ -69,7 +88,7 @@ jobs:
           retention-days: 14
 
       - name: Notify external callback
-        if: always() && inputs.callback_url != ''
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.callback_url != ''
         env:
           CALLBACK_URL: ${{ inputs.callback_url }}
           REQUEST_ID: ${{ inputs.request_id }}
