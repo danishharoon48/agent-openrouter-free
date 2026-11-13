@@ -58,13 +58,14 @@ jobs:
           done
           sudo iptables -A UBA_QA_EGRESS -j RETURN
           sudo iptables -I INPUT 1 -s 172.31.240.0/24 -j DROP
-      - name: Pull isolated Playwright runtime
+      - name: Build isolated Playwright runtime
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
-        run: docker pull mcr.microsoft.com/playwright/python:v1.52.0-noble
+        run: docker build --pull -f Dockerfile.sandbox -t uba-playwright-sandbox:local .
       - name: Run isolated container integration test
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
         env:
           BROWSER_SANDBOX_INTEGRATION: "1"
+          BROWSER_SANDBOX_IMAGE: uba-playwright-sandbox:local
         run: python -m unittest discover -s tests -p "test_sandbox_integration.py" -v
       - name: Execute multilingual task
         if: github.event_name == 'workflow_dispatch'
@@ -79,7 +80,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           BROWSER_SANDBOX_NETWORK: uba-agent-sandbox
-          BROWSER_SANDBOX_IMAGE: mcr.microsoft.com/playwright/python:v1.52.0-noble
+          BROWSER_SANDBOX_IMAGE: uba-playwright-sandbox:local
         run: python agent_runner.py --timeout 180
       - name: Upload output, screenshots and logs
         if: always()
