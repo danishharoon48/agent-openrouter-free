@@ -207,7 +207,10 @@ def main():
     parser.add_argument('--timeout', type=int, default=180)
     args = parser.parse_args()
     if not args.task_prompt.strip(): parser.error('task_prompt is required')
-    try:\n        args.target_url = validate_public_target(args.target_url)\n    except ValueError as exc:\n        parser.error(str(exc))
+    try:
+        args.target_url = validate_public_target(args.target_url)
+    except ValueError as exc:
+        parser.error(str(exc))
     if not args.provider: parser.error('PRIMARY_PROVIDER is required')
     ARTIFACTS.mkdir(exist_ok=True)
     history, code, error = [], '', ''
