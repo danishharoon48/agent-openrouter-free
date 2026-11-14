@@ -150,7 +150,19 @@ jobs:
           python-version: "3.12"
       - name: Validate runner modules
         run: python -m py_compile agent_runner.py provider_api.py
+      - name: Check optional provider API secret
+        id: provider-secret
+        env:
+          PROVIDER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::OPENROUTER_API_KEY is not configured in this provider repository; live smoke skipped."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Configure restricted sandbox egress
+        if: steps.provider-secret.outputs.configured == 'true'
         run: |
           docker network create --driver bridge --subnet=172.31.240.0/24 --ipv6=false uba-agent-sandbox
           sudo iptables -N UBA_QA_EGRESS 2>/dev/null || true
@@ -162,8 +174,10 @@ jobs:
           sudo iptables -A UBA_QA_EGRESS -j RETURN
           sudo iptables -I INPUT 1 -s 172.31.240.0/24 -j DROP
       - name: Build isolated Chromium image
+        if: steps.provider-secret.outputs.configured == 'true'
         run: docker build --pull -f Dockerfile.sandbox -t uba-playwright-sandbox:local .
       - name: Execute live provider generation and three browser scenarios
+        if: steps.provider-secret.outputs.configured == 'true'
         env:
           PRIMARY_PROVIDER: openrouter
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -190,6 +204,7 @@ jobs:
             exit non-zero. Never fabricate values or claim success because the script merely ran.
         run: python agent_runner.py --provider openrouter --fallback-provider none --target-url "$TARGET_URL" --task-prompt "$TASK_PROMPT" --timeout 180
       - name: Verify exact benchmark observations
+        if: steps.provider-secret.outputs.configured == 'true'
         run: |
           python - <<'PY'
           import json
