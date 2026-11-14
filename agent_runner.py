@@ -10,19 +10,10 @@ OUTPUT = ROOT / 'output.json'
 ARTIFACTS = ROOT / 'artifacts'
 MAX_REPAIRS = 5
 
-def extract_code(raw):
-    text = (raw or '').strip()
-    try:
-        obj = json.loads(text)
-        if isinstance(obj, dict):
-            for key in ('code', 'python', 'script', 'content'):
-                if isinstance(obj.get(key), str):
-                    text = obj[key].strip()
-                    break
-    except (ValueError, TypeError):
-        pass
-    text = re.sub(r'^\\s*```(?:python|py|json)?\\s*', '', text, flags=re.I)
-    text = re.sub(r'\\s*```\\s*def sandbox_environment():
+from provider_api import ask_model, build_prompt, extract_code, provider_config
+
+
+def sandbox_environment():
     """Return a minimal host environment for Docker CLI and syntax checks."""
     root = ROOT / ".agent-runner-host"
     home, temporary = root / "home", root / "tmp"
@@ -463,6 +454,8 @@ def execute_script(code, timeout):
             return False, "Sandbox produced invalid output.json: " + str(exc) + "\n" + logs[-4000:]
         if not isinstance(data, dict):
             return False, "Sandbox output.json must contain a JSON object.\n" + logs[-4000:]
+        if data.get("success") is not True:
+            return False, "Sandbox output did not verify task success=true.\n" + logs[-4000:]
         OUTPUT.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return True, logs[-8000:]
     except subprocess.TimeoutExpired as exc:
@@ -506,7 +499,7 @@ def main():
     providers = [args.provider]
     if args.fallback_provider and args.fallback_provider.lower() not in ('none', args.provider.lower()): providers.append(args.fallback_provider)
     for attempt in range(MAX_REPAIRS + 1):
-        provider = providers[1] if attempt > 0 and len(providers) > 1 else providers[0]
+        provider = providers[attempt % len(providers)]
         try:
             code = extract_code(ask_model(provider, build_prompt(args.task_prompt, args.target_url, code, error)))
             if not code: raise RuntimeError('Provider returned empty script')
