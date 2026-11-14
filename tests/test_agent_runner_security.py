@@ -94,10 +94,6 @@ class RunnerSecurityTests(unittest.TestCase):
                     agent_runner.validate_public_target(url)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_provider_generation_pipeline_is_defined(self):
         for name in ("extract_code", "provider_config", "ask_model", "build_prompt"):
             with self.subTest(name=name):
@@ -129,12 +125,18 @@ if __name__ == "__main__":
                 )
                 return subprocess.CompletedProcess(command, 0, "", "")
 
-            with patch.object(agent_runner, "ROOT", root), \\
-                 patch.object(agent_runner, "OUTPUT", root / "output.json"), \\
-                 patch.object(agent_runner, "ARTIFACTS", root / "artifacts"), \\
-                 patch("agent_runner.tempfile.mkdtemp", return_value=str(workspace)), \\
-                 patch("agent_runner.subprocess.run", side_effect=fake_run):
+            with (
+                patch.object(agent_runner, "ROOT", root),
+                patch.object(agent_runner, "OUTPUT", root / "output.json"),
+                patch.object(agent_runner, "ARTIFACTS", root / "artifacts"),
+                patch("agent_runner.tempfile.mkdtemp", return_value=str(workspace)),
+                patch("agent_runner.subprocess.run", side_effect=fake_run),
+            ):
                 success, logs = agent_runner.execute_script("print('test')", timeout=5)
 
         self.assertFalse(success)
         self.assertIn("success", logs.lower())
+
+
+if __name__ == "__main__":
+    unittest.main()
