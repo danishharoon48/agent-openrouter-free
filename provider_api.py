@@ -42,14 +42,14 @@ def provider_config(provider):
             raise RuntimeError("GEMINI_API_KEY is not configured.")
         return (
             "gemini",
-            os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
             key,
         )
     if normalized == "groq":
         key = os.getenv("GROQ_API_KEY")
         if not key:
             raise RuntimeError("GROQ_API_KEY is not configured.")
-        return "openai", os.getenv("GROQ_MODEL", "qwen/qwen3-32b"), key
+        return "openai", os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"), key
     if normalized in ("openrouter", "open-router"):
         key = os.getenv("OPENROUTER_API_KEY")
         if not key:
@@ -80,7 +80,10 @@ def ask_model(provider, prompt, retries=3):
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
+            "max_tokens": 4096,
         }
+        if kind == "openai":
+            payload["reasoning_effort"] = "low"
         headers = {
             "Content-Type": "application/json",
             "Authorization": "Bearer " + key,
