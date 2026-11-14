@@ -96,3 +96,45 @@ class RunnerSecurityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_provider_generation_pipeline_is_defined(self):
+        for name in ("extract_code", "provider_config", "ask_model", "build_prompt"):
+            with self.subTest(name=name):
+                self.assertTrue(callable(getattr(agent_runner, name, None)))
+
+    def test_prompt_requires_truthful_success_evidence(self):
+        prompt = agent_runner.build_prompt("Inspect the page", "https://example.com")
+        self.assertIn("success", prompt.lower())
+        self.assertIn("verified", prompt.lower())
+        self.assertIn("Never fabricate", prompt)
+
+    def test_execute_script_rejects_output_that_reports_failure(self):
+        import json
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / ".agent-sandbox-test"
+            workspace.mkdir()
+
+            def fake_run(command, **kwargs):
+                if "-m" in command and "py_compile" in command:
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                (workspace / "output.json").write_text(
+                    json.dumps({"success": False, "error": "task did not complete"}),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch.object(agent_runner, "ROOT", root), \\
+                 patch.object(agent_runner, "OUTPUT", root / "output.json"), \\
+                 patch.object(agent_runner, "ARTIFACTS", root / "artifacts"), \\
+                 patch("agent_runner.tempfile.mkdtemp", return_value=str(workspace)), \\
+                 patch("agent_runner.subprocess.run", side_effect=fake_run):
+                success, logs = agent_runner.execute_script("print('test')", timeout=5)
+
+        self.assertFalse(success)
+        self.assertIn("success", logs.lower())
