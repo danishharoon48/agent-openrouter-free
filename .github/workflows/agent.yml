@@ -1,6 +1,13 @@
 name: Dynamic multilingual browser agent
 run-name: Browser task ${{ inputs.request_id }}
 on:
+  pull_request:
+    paths:
+      - "agent_runner.py"
+      - "provider_api.py"
+      - "Dockerfile.sandbox"
+      - "tests/**"
+      - ".github/workflows/agent.yml"
   workflow_dispatch:
     inputs:
       task_prompt:
@@ -32,29 +39,51 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-    env:
-      PRIMARY_PROVIDER: openrouter
-      TASK_PROMPT: ${{ inputs.task_prompt }}
-      TARGET_URL: ${{ inputs.target_url }}
-      FALLBACK_PROVIDER: ${{ inputs.fallback_provider }}
-      CALLBACK_URL: ${{ inputs.callback_url }}
-      REQUEST_ID: ${{ inputs.request_id }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install Playwright
-        run: |
-          python -m pip install --upgrade pip
-          pip install playwright
-          python -m playwright install --with-deps chromium
       - name: Validate runner
         run: python -m py_compile agent_runner.py
+      - name: Run runner security tests
+        run: python -m unittest discover -s tests -v
+      - name: Configure restricted browser sandbox network
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        run: |
+          docker network create --driver bridge --subnet=172.31.240.0/24 --ipv6=false uba-agent-sandbox
+          sudo iptables -N UBA_QA_EGRESS 2>/dev/null || true
+          sudo iptables -F UBA_QA_EGRESS
+          sudo iptables -C DOCKER-USER -s 172.31.240.0/24 -j UBA_QA_EGRESS 2>/dev/null || sudo iptables -I DOCKER-USER 1 -s 172.31.240.0/24 -j UBA_QA_EGRESS
+          for cidr in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 192.88.99.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4; do
+            sudo iptables -A UBA_QA_EGRESS -d "$cidr" -j DROP
+          done
+          sudo iptables -A UBA_QA_EGRESS -j RETURN
+          sudo iptables -I INPUT 1 -s 172.31.240.0/24 -j DROP
+      - name: Build isolated Playwright runtime
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        run: docker build --pull -f Dockerfile.sandbox -t uba-playwright-sandbox:local .
+      - name: Run isolated container integration test
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          BROWSER_SANDBOX_INTEGRATION: "1"
+          BROWSER_SANDBOX_IMAGE: uba-playwright-sandbox:local
+        run: python -m unittest discover -s tests -p "test_sandbox_integration.py" -v
       - name: Execute multilingual task
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PRIMARY_PROVIDER: openrouter
+          TASK_PROMPT: ${{ inputs.task_prompt }}
+          TARGET_URL: ${{ inputs.target_url }}
+          FALLBACK_PROVIDER: ${{ inputs.fallback_provider }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_ALLOWED_HOSTS: ${{ vars.CALLBACK_ALLOWED_HOSTS }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          BROWSER_SANDBOX_NETWORK: uba-agent-sandbox
+          BROWSER_SANDBOX_IMAGE: uba-playwright-sandbox:local
         run: python agent_runner.py --timeout 180
       - name: Upload output, screenshots and logs
         if: always()
@@ -69,7 +98,7 @@ jobs:
           retention-days: 14
 
       - name: Notify external callback
-        if: always() && inputs.callback_url != ''
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.callback_url != ''
         env:
           CALLBACK_URL: ${{ inputs.callback_url }}
           REQUEST_ID: ${{ inputs.request_id }}
@@ -78,31 +107,198 @@ jobs:
           ARTIFACT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python - <<'PY'
-          import json, os, pathlib, urllib.request
-          output = None
-          path = pathlib.Path("output.json")
-          if path.exists():
-              try:
-                  output = json.loads(path.read_text(encoding="utf-8"))
-              except Exception:
-                  output = path.read_text(encoding="utf-8")[:50000]
-          payload = {
-              "task_id": os.environ.get("REQUEST_ID", ""),
-              "status": os.environ.get("TASK_STATUS", "completed"),
-              "output": output,
-              "run_url": os.environ["RUN_URL"],
-              "screenshot_url": os.environ["ARTIFACT_URL"] + "#artifacts",
-              "artifact_url": os.environ["ARTIFACT_URL"] + "#artifacts"
+          import http.client
+          import ipaddress
+          import json
+          import os
+          import socket
+          import ssl
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          callback_url = os.environ.get("CALLBACK_URL", "")
+          allowed_hosts = {
+              item.strip().lower().rstrip(".")
+              for item in os.environ.get("CALLBACK_ALLOWED_HOSTS", "").split(",")
+              if item.strip()
           }
-          request = urllib.request.Request(
-              os.environ["CALLBACK_URL"],
-              data=json.dumps(payload).encode("utf-8"),
-              headers={"Content-Type": "application/json", "X-Blarumo-Task-ID": payload["task_id"]},
-              method="POST"
-          )
+          if not callback_url:
+              raise SystemExit(0)
+
           try:
-              with urllib.request.urlopen(request, timeout=15) as response:
-                  print("Callback delivered:", response.status)
+              parsed = urlsplit(callback_url)
+              host = (parsed.hostname or "").lower().rstrip(".")
+              callback_port = parsed.port
+          except ValueError:
+              print("Callback skipped: malformed URL.")
+              raise SystemExit(0)
+          if (
+              parsed.scheme != "https"
+              or not host
+              or parsed.username
+              or parsed.password
+              or parsed.fragment
+              or callback_port not in (None, 443)
+              or host not in allowed_hosts
+          ):
+              print("Callback skipped: HTTPS URL host is not on CALLBACK_ALLOWED_HOSTS.")
+              raise SystemExit(0)
+
+          try:
+              addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+              resolved = list(dict.fromkeys(item[4][0] for item in addresses))
+              if not resolved or any(not ipaddress.ip_address(value).is_global for value in resolved):
+                  print("Callback blocked: hostname resolved to a non-public address.")
+                  raise SystemExit(0)
+
+              class PinnedHTTPSConnection(http.client.HTTPSConnection):
+                  def __init__(self, hostname, pinned_ip):
+                      super().__init__(hostname, 443, timeout=15, context=ssl.create_default_context())
+                      self.pinned_ip = pinned_ip
+
+                  def connect(self):
+                      sock = socket.create_connection((self.pinned_ip, self.port), self.timeout)
+                      self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+              output = None
+              output_path = Path("output.json")
+              if output_path.exists():
+                  try:
+                      output = json.loads(output_path.read_text(encoding="utf-8"))
+                  except Exception:
+                      output = {"unparsed_output": output_path.read_text(encoding="utf-8")[:12000]}
+
+              payload = {
+                  "task_id": os.environ.get("REQUEST_ID", ""),
+                  "status": os.environ.get("TASK_STATUS", "completed"),
+                  "output": output,
+                  "run_url": os.environ["RUN_URL"],
+                  "artifact_url": os.environ["ARTIFACT_URL"] + "#artifacts",
+              }
+              body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+              connection = PinnedHTTPSConnection(host, resolved[0])
+              path = parsed.path or "/"
+              if parsed.query:
+                  path += "?" + parsed.query
+              connection.request(
+                  "POST",
+                  path,
+                  body=body,
+                  headers={
+                      "Host": host,
+                      "Content-Type": "application/json",
+                      "Content-Length": str(len(body)),
+                      "X-Blarumo-Task-ID": payload["task_id"],
+                      "Connection": "close",
+                  },
+              )
+              response = connection.getresponse()
+              if 300 <= response.status < 400:
+                  print("Callback blocked: redirects are not followed.")
+              else:
+                  print("Callback response:", response.status)
+              connection.close()
+          except SystemExit:
+              raise
           except Exception as error:
-              print("Callback delivery failed:", str(error))
+              print("Callback delivery failed:", type(error).__name__)
           PY
+
+  provider-acceptance:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate runner modules
+        run: python -m py_compile agent_runner.py provider_api.py
+      - name: Check optional provider API secret
+        id: provider-secret
+        env:
+          PROVIDER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::OPENROUTER_API_KEY is not configured in this provider repository; live smoke skipped."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Configure restricted sandbox egress
+        if: steps.provider-secret.outputs.configured == 'true'
+        run: |
+          docker network create --driver bridge --subnet=172.31.240.0/24 --ipv6=false uba-agent-sandbox
+          sudo iptables -N UBA_QA_EGRESS 2>/dev/null || true
+          sudo iptables -F UBA_QA_EGRESS
+          sudo iptables -C DOCKER-USER -s 172.31.240.0/24 -j UBA_QA_EGRESS 2>/dev/null || sudo iptables -I DOCKER-USER 1 -s 172.31.240.0/24 -j UBA_QA_EGRESS
+          for cidr in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 192.88.99.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4; do
+            sudo iptables -A UBA_QA_EGRESS -d "$cidr" -j DROP
+          done
+          sudo iptables -A UBA_QA_EGRESS -j RETURN
+          sudo iptables -I INPUT 1 -s 172.31.240.0/24 -j DROP
+      - name: Build isolated Chromium image
+        if: steps.provider-secret.outputs.configured == 'true'
+        run: docker build --pull -f Dockerfile.sandbox -t uba-playwright-sandbox:local .
+      - name: Execute live provider generation and three browser scenarios
+        if: steps.provider-secret.outputs.configured == 'true'
+        env:
+          PRIMARY_PROVIDER: openrouter
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TARGET_URL: https://example.com
+          BROWSER_SANDBOX_NETWORK: uba-agent-sandbox
+          BROWSER_SANDBOX_IMAGE: uba-playwright-sandbox:local
+          TASK_PROMPT: >-
+            Navigate to the supplied start URL with headless Chromium and verify that its title is "Example Domain".
+            Then use page.set_content to create a deterministic in-memory fixture containing:
+            a form with input#search, button[type=submit], and div#search-result;
+            button#load-record and div#dynamic-result initially showing "Waiting...";
+            h1 showing "Page 1 of 2", div#page-record showing "Record 1 of 2", and a#next.
+            Add real JavaScript event handlers: search submission prevents navigation, reads the input value,
+            and sets #search-result to "Found: browser automation"; clicking #load-record asynchronously changes
+            #dynamic-result after 250 milliseconds to "Loaded record: DYNAMIC-42"; clicking a#next prevents
+            navigation and changes the h1 to "Page 2 of 2" and #page-record to
+            "Record 2 of 2: pagination verified".
+            Use actual Playwright actions for all scenarios: fill and submit the form, click the dynamic button
+            and wait_for_function for the exact inserted text, then click the Next link and wait for the exact
+            page indicator. Read all three final values using locator.inner_text and assert exact equality.
+            Save a full-page screenshot at artifacts/final.png. Write output.json as a JSON object with
+            success=true, result.search, result.dynamic_dom, result.pagination, and error=null only after
+            every live DOM assertion passes. If any step fails, write success=false with a useful error and
+            exit non-zero. Never fabricate values or claim success because the script merely ran.
+        run: python agent_runner.py --provider openrouter --fallback-provider none --target-url "$TARGET_URL" --task-prompt "$TASK_PROMPT" --timeout 180
+      - name: Verify exact benchmark observations
+        if: steps.provider-secret.outputs.configured == 'true'
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("output.json").read_text(encoding="utf-8"))
+          assert data.get("success") is True, "provider task did not report success"
+          result = data.get("result")
+          assert isinstance(result, dict), "result must be an object"
+          expected = {
+              "search": "Found: browser automation",
+              "dynamic_dom": "Loaded record: DYNAMIC-42",
+              "pagination": "Record 2 of 2: pagination verified",
+          }
+          for key, value in expected.items():
+              assert result.get(key) == value, f"{key} mismatch"
+          print("All three browser scenarios passed for openrouter.")
+          PY
+      - name: Upload provider acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrouter-provider-acceptance
+          path: |
+            output.json
+            generated_task.py
+            artifacts/
+          if-no-files-found: warn
+          retention-days: 14
